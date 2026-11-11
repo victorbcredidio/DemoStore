@@ -7,3 +7,7 @@ app/instance/
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
+# Generated browser RUM bundle (built in the Docker image)
+rum/node_modules/
+rum/dist/
+app/demostore/rum_dist/

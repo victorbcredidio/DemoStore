@@ -2,6 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  {% if rum_script %}
+  {# Browser RUM (DEMO_RUM_ENABLED=1). Loaded first so it wraps fetch before store.js runs. #}
+  <meta name="demostore-release" content="{{ release_id }}">
+  <script src="{{ rum_script }}" defer></script>
+  {% endif %}
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{ csrf_token }}">
   <meta name="lab-traffic-type" content="{{ traffic_type }}">

@@ -9,3 +9,6 @@ tests
 venv
 compose.yaml
 README.md
+rum/node_modules
+rum/dist
+app/demostore/rum_dist

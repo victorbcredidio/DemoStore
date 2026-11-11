@@ -12,7 +12,7 @@ import time
 
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 from werkzeug.exceptions import HTTPException
-from . import telemetry
+from . import rum, telemetry
 from .contracts import SCENARIOS, TRANSACTION_ID
 from .checkout import process as process_checkout
 
@@ -34,6 +34,8 @@ def create_app(config=None):
         DEMO_PASSWORD=os.environ.get("DEMO_PASSWORD", "demo_pass"),
         RELEASE_ID=os.environ.get("DEMO_RELEASE_ID", "development"),
         TELEMETRY_ENABLED=os.environ.get("DEMO_TELEMETRY_ENABLED", "0") == "1",
+        RUM_ENABLED=os.environ.get("DEMO_RUM_ENABLED", "0") == "1",
+        RUM_DIR=os.environ.get("DEMO_RUM_DIR"),
         SESSION_COOKIE_NAME="demostore_session",
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
@@ -157,7 +159,8 @@ def create_app(config=None):
 
     @app.after_request
     def headers(response):
-        response.headers["Cache-Control"] = "no-store"
+        if request.path not in (rum.BUNDLE_PATH, rum.LICENSES_PATH):
+            response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "same-origin"
         response.headers["Content-Security-Policy"] = (
@@ -329,7 +332,8 @@ def create_app(config=None):
             except (OSError, ValueError):
                 services["demostore-" + component] = {"healthy": False}
         return jsonify(ok=True, service="demostore", release=app.config["RELEASE_ID"], control=control(),
-                       scenarios=sorted(MODES), dependencies=services, telemetry_enabled=app.config["TELEMETRY_ENABLED"])
+                       scenarios=sorted(MODES), dependencies=services, telemetry_enabled=app.config["TELEMETRY_ENABLED"],
+                       rum_enabled=app.extensions["demostore.rum"]["bundle"] is not None)
 
     def transaction_row(row):
         result = dict(row)
@@ -355,5 +359,6 @@ def create_app(config=None):
             return failure(error.name.upper().replace(" ", "_"), error.description, error.code)
         return error
 
+    rum.configure(app)
     telemetry.configure(app)
     return app

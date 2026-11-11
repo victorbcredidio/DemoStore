@@ -1,4 +1,14 @@
 # syntax=docker/dockerfile:1
+
+# --- Stage 1: browser RUM bundle (Node is used only here, not in the final image) ---------
+FROM node:24.22.2-slim AS rum
+WORKDIR /build
+COPY rum/package.json rum/package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY rum/ ./
+RUN npm test && RUM_OUT_DIR=/build/dist npm run build
+
+# --- Stage 2: the application ----------------------------------------------------------------
 FROM python:3.12-slim
 
 ARG DEMO_RELEASE_ID=dev
@@ -13,7 +23,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DEMO_DATABASE=/var/lib/demostore/lab.sqlite3 \
     DEMO_PORT=8000 \
     DEMO_BASE_URL=http://127.0.0.1:8000 \
-    DEMO_TRAFFIC_BACKEND=process
+    DEMO_TRAFFIC_BACKEND=process \
+    DEMO_RUM_ENABLED=0
 
 WORKDIR /opt/demostore
 
@@ -28,6 +39,8 @@ RUN groupadd --system --gid 10001 demostore \
  && install -d -o demostore -g demostore -m 700 /var/lib/demostore
 
 COPY app/ app/
+# Observer bundle, its dependency licences and build manifest; served only when DEMO_RUM_ENABLED=1.
+COPY --from=rum /build/dist/ app/demostore/rum_dist/
 COPY docker/entrypoint.py /usr/local/bin/demostore-entrypoint
 RUN printf '#!/bin/sh\nexec python /opt/demostore/app/demostore_cli.py "$@"\n' > /usr/local/bin/demostore \
  && chmod 755 /usr/local/bin/demostore /usr/local/bin/demostore-entrypoint

@@ -1,6 +1,6 @@
 # DemoStore
 
-A small, deterministic online store for **monitoring demonstrations**. It covers synthetic browser checks, backend APM with OpenTelemetry, and later browser RUM. You can switch checkout between healthy, slow, failing and recovering on demand, and every request produces readable traces, metrics and logs.
+A small, deterministic online store for **monitoring demonstrations**. It covers synthetic browser checks, backend APM with OpenTelemetry, and browser RUM (Real User Monitoring). You can switch checkout between healthy, slow, failing and recovering on demand, and every request produces readable traces, metrics and logs.
 
 > **Test-only application.** It uses a public demo account, has no real payments and stores simulated orders only. Don't expose it to the Internet.
 
@@ -12,6 +12,8 @@ Browser ──► demostore (Flask/Gunicorn, :8000)
                └─ HTTP ─► demostore-payment   (127.0.0.1:8102) ─► demostore-bank (127.0.0.1:8103)
             SQLite: orders, transaction ledger, receipt outbox, shared fault mode
             Optional OTLP/HTTP export of traces, metrics and logs from all four services
+            Optional browser RUM: the page loads /__rum__/rum-v1.js, which reports to /__rum__/v1/*,
+            and the store relays that to the same Collector (service demostore-browser)
 ```
 
 - **Store:** login, two products (Laptop $999, Headphones $149), a per-browser cart and a simulated checkout.
@@ -71,6 +73,8 @@ docker run -d --name demostore -p 8080:8000 -v demostore-data:/var/lib/demostore
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | none | Base OTLP/HTTP URL, for example `http://collector:4318`; the entrypoint derives the `/v1/traces`, `/v1/metrics` and `/v1/logs` endpoints |
 | `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_ENDPOINT` | `http://127.0.0.1:4318/v1/…` | Per-signal endpoints (override the base) |
 | `OTEL_METRIC_EXPORT_INTERVAL` | `15000` | Metric export interval in ms |
+| `DEMO_RUM_ENABLED` | `0` | `1` adds the browser RUM observer to every page and opens the `/__rum__/v1/*` relay (see [Browser RUM](#browser-rum)) |
+| `DEMO_RUM_OTLP_ENDPOINT` | the backend's OTLP endpoints | Base OTLP/HTTP URL for browser telemetry only, if it should go to a different Collector |
 | `DEMO_TRAFFIC_BACKEND` | `process` in the image | How `demostore traffic` runs: `process` (detached background process) or `systemd` (`demostore-traffic.service`) |
 
 All state (SQLite database and session key) is in the `/var/lib/demostore` volume. The container runs as UID 10001. If you bind-mount a host directory instead of a named volume, make it writable for that UID.
@@ -180,22 +184,105 @@ Zabbix stores incoming metrics in ClickHouse (for example `otel_metrics_sum` and
 
 Every request is labelled `lab.traffic_type = manual | synthetic | unclassified`. Synthetic sessions start at `/login?traffic=synthetic` (for example a Zabbix Browser item), and CLI traffic is always synthetic. Exclude synthetic traffic from "real user" figures.
 
+## Browser RUM
+
+RUM measures what each visitor's browser actually experienced: page load, Web Vitals, API calls, the checkout click until the result is visible, and JavaScript errors. A small OpenTelemetry observer (built from [`rum/`](rum/) into the image) runs in the page and reports as service **`demostore-browser`**.
+
+```text
+Browser ── GET /, /login ─────────────► demostore   (page includes <script src="/__rum__/rum-v1.js?v=…">)
+        ── POST /__rum__/v1/{traces,metrics,logs} (OTLP/JSON) ─► demostore relay ─► Collector :4318 ─► Zabbix proxy :4317
+        ── fetch /api/checkout + traceparent ─► demostore ─► payment ─► bank     (one trace, browser to bank)
+```
+
+Everything stays on the store's own origin, so there is no CORS and the Collector never has to be reachable from browsers.
+
+### Turn it on
+
+Add `-e DEMO_RUM_ENABLED=1` to a container that already sends backend telemetry. With the Collector on the same Podman host:
+
+```bash
+podman run -d --name demostore -p 8080:8000 \
+  -e DEMO_TELEMETRY_ENABLED=1 -e DEMO_RUM_ENABLED=1 \
+  -e OTEL_EXPORTER_OTLP_ENDPOINT=http://host.containers.internal:4318 \
+  -v demostore-data:/var/lib/demostore \
+  ghcr.io/victorbcredidio/demostore:latest
+```
+
+No Collector change is needed: the store relays browser data as OTLP/JSON to the same `/v1/traces`, `/v1/metrics` and `/v1/logs` endpoints as the backend. To send browser data elsewhere, set `DEMO_RUM_OTLP_ENDPOINT`. `/api/lab/status` reports `rum_enabled`; if the bundle is missing the store logs an error and runs without RUM.
+
+### What is collected, and what isn't
+
+| Collected (bounded, fixed vocabulary) | Never collected |
+| --- | --- |
+| Navigation timing; Web Vitals TTFB, FCP, LCP, INP, CLS (each update with `web.vital.id` and `web.vital.sequence`); timing of `store.js`, `store.css` and the observer itself; long tasks; same-origin `/api/*` call timing and status; checkout click → visible result (`browser.checkout`); JavaScript error *categories*; clicks on a fixed set of buttons | Input values, credentials, cookies, CSRF tokens, request/response bodies, full URLs and query strings, page text, console output, exception messages and stacks, session replay, screenshots, persistent user IDs |
+
+Browser spans: `browser.navigation`, `browser.web_vital`, `browser.resource`, `browser.long_task`, `browser.action`, `browser.checkout`, `browser.error`, `GET|POST /api/…`. Metrics (delta temporality): `demostore.browser.http.duration`, `demostore.browser.checkout.duration`, `demostore.browser.long_task.duration`, `demostore.browser.errors`. Logs: `browser.page.observed`, `browser.web_vital`, `browser.checkout.visible_result`, `browser.error`.
+
+Labels on every browser signal: `lab.traffic_type` (`synthetic` for `/login?traffic=synthetic` and for automated browsers such as Selenium; `manual` otherwise), `page.route` (`/`, `/login` or `other`), `rum.page.id` (random per page view, not per person), `lab.browser_simulation`. The resource carries `service.namespace=user-experience-lab` and `service.version` = the store's `DEMO_RELEASE_ID`, the same as the backend.
+
+The **Browser RUM lab** panel inside *Lab controls* creates one-off browser problems in that tab: a 600 ms stall (long task and a poor INP), a delayed layout shift (CLS), a JavaScript error and an unhandled rejection. After using it, that page's data is marked `lab.browser_simulation=true`.
+
+### Find it in Zabbix
+
+1. Open the store in a normal browser, sign in and do a checkout. Browser spans are sent every 2 s, metrics every 10 s, and everything is flushed when the tab is hidden or closed.
+2. **APM → Traces:** select `demostore-browser` together with `demostore`, `demostore-payment` and `demostore-bank`. Open a trace whose root is `browser.checkout`. The waterfall shows `browser.checkout` → `POST /api/checkout` (browser) → `POST /api/checkout` (demostore) → `checkout` → … → `payment.authorize` → `bank.charge`, all with one trace ID.
+3. To find one specific checkout, take the trace ID from the `X-Trace-Id` response header (browser developer tools → Network → `checkout`) and search for it.
+4. Useful span attributes (*Customize table → Span attributes*): `lab.traffic_type`, `http.response.status_code`, `ui.outcome`, `ui.duration_ms`, `web.vital.name`, `web.vital.value`, `web.vital.rating`, `error.type`.
+5. **APM → Logs:** filter by event name (`browser.web_vital`, `browser.error`, `browser.checkout.visible_result`). **APM → Metrics:** the `demostore.browser.*` metrics.
+
+To confirm arrival directly in ClickHouse (run on the ClickHouse host; if a column name differs in your version, `DESCRIBE TABLE` first):
+
+```bash
+clickhouse-client -q "
+SELECT 'spans' AS signal, count() AS rows, max(Timestamp) AS latest FROM zabbix.otel_traces WHERE ServiceName='demostore-browser' AND Timestamp > now() - INTERVAL 15 MINUTE
+UNION ALL SELECT 'logs', count(), max(Timestamp) FROM zabbix.otel_logs WHERE ServiceName='demostore-browser' AND Timestamp > now() - INTERVAL 15 MINUTE
+UNION ALL SELECT 'histograms', count(), max(TimeUnix) FROM zabbix.otel_metrics_histogram WHERE ServiceName='demostore-browser' AND TimeUnix > now() - INTERVAL 15 MINUTE
+UNION ALL SELECT 'sums', count(), max(TimeUnix) FROM zabbix.otel_metrics_sum WHERE ServiceName='demostore-browser' AND TimeUnix > now() - INTERVAL 15 MINUTE"
+
+# One checkout, browser to bank (paste a trace ID from X-Trace-Id):
+clickhouse-client -q "SELECT ServiceName, SpanName, SpanAttributes['lab.traffic_type'] FROM zabbix.otel_traces WHERE TraceId='<trace-id>' ORDER BY Timestamp"
+```
+
+### Relay safety rules
+
+`/__rum__/v1/{traces,metrics,logs}` accepts `POST` with `Content-Type: application/json` only (others: 405 or 415), at most 256 KiB (413), and 10 requests/s per client address with a burst of 30 (429; counted per Gunicorn worker). Browser headers are not forwarded, redirects are not followed, the upstream URL is fixed by configuration, and the upstream timeout is 2 s (502 if the Collector is unreachable; shopping is unaffected). Any other `/__rum__/` path is 404. The relay is excluded from backend traces and metrics, so RUM doesn't produce telemetry about itself.
+
+### HTTP vs HTTPS
+
+The container serves plain HTTP. On `localhost`/`127.0.0.1` a browser treats that as a secure context; from another machine (`http://<host>:8080`) it doesn't. The observer itself uses no secure-context-only API, and in the original lab it loaded and exported over plain HTTP. Each page records the situation as `browser.secure_context` on the `browser.page.observed` log, so you can compare. Whether a particular browser version reports fewer Web Vitals over plain HTTP has **not been measured** here.
+
+For HTTPS, put a TLS reverse proxy (NGINX, Caddy, Traefik) in front of port 8000 that passes the path through unchanged, and run the store with `-e DEMO_COOKIE_SECURE=1`. `/__rum__/` must be proxied like any other path; don't cache or buffer-rewrite it. Behind a proxy all visitors share the proxy's address for the rate limit.
+
 ## Development
 
 ```bash
 python -m venv .venv
 . .venv/bin/activate            # Windows: .venv\Scripts\activate
 pip install -r requirements.lock.txt
-python -m unittest discover -s tests -p "test_*.py" -v     # 59 tests (one is Linux-only), no network needed
+python -m unittest discover -s tests -p "test_*.py" -v     # 72 tests (one is Linux-only), no network needed
 ```
 
 `tests/smoke_http.py --base-url http://localhost:8080` runs live checks against a running instance. It changes the shared mode temporarily and restores it afterwards.
 
-Every push to `main` runs the unit tests, builds the image, starts it and runs `smoke_http.py`, CLI checks and a short traffic-generator run against the running container. Only then is the image published to `ghcr.io/victorbcredidio/demostore`, tagged `latest` and `sha-<commit>`; `v*` git tags add a version tag.
+The browser observer (Node 24, versions pinned in `rum/package-lock.json`):
+
+```bash
+cd rum
+npm ci --ignore-scripts
+npm test                     # route/privacy policy tests
+npm run build                # writes rum/dist/rum-v1.js, LICENSES.txt, manifest.json
+# against a running store with DEMO_RUM_ENABLED=1 and DEMO_TELEMETRY_ENABLED=1:
+RUM_BASE_URL=http://127.0.0.1:8080 RUM_CHROME_PATH=/usr/bin/google-chrome node browser_acceptance.mjs
+```
+
+To run the store from source with RUM, set `DEMO_RUM_ENABLED=1` and `DEMO_RUM_DIR=<repo>/rum/dist`.
+
+Every push to `main` runs the unit tests, builds the image (including the observer's policy tests and bundle build), starts it and runs `smoke_http.py`, CLI checks and a short traffic-generator run against the running container. A second container then runs with RUM on next to a throwaway Collector; headless Chrome logs in, shops, checks out and triggers the browser simulations, and `tests/rum_e2e_check.py` asserts that the Collector received `demostore-browser` spans, metrics and logs, and that checkout traces contain browser and backend spans under one trace ID. Only then is the image published to `ghcr.io/victorbcredidio/demostore`, tagged `latest` and `sha-<commit>`; `v*` git tags add a version tag.
 
 ## Limitations
 
 - Mock dependencies only; compensation is best-effort and receipts are never sent.
 - One shared fault mode for all users.
 - Tuned for demonstrations, not load testing.
-- The browser RUM bundle and NGINX injection used in the original lab are not part of this repository yet.
+- OpenTelemetry's browser SDKs are still experimental upstream; the pinned versions (`rum/package.json`) are the ones tested here. Missing Web Vitals mean "not reported", not zero; INP needs an interaction, and the last export of a page can be lost if the browser is killed.
+- The initial HTML page load is not part of a browser trace (the observer isn't running yet); only `/api/*` calls made after it loads join backend traces.

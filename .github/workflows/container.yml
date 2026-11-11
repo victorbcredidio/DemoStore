@@ -69,9 +69,63 @@ jobs:
           docker exec demostore-ci python -c "import glob; z=[p for p in glob.glob('/proc/[0-9]*/stat') if open(p).read().rsplit(')',1)[1].split()[0]=='Z']; print('zombies:', z); assert not z"
           curl -fsS http://127.0.0.1:8000/healthz
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.22.2"
+
+      - name: Browser RUM end-to-end (headless Chrome -> DemoStore relay -> Collector)
+        env:
+          OUT: ${{ runner.temp }}/otel
+        run: |
+          mkdir -p "$OUT" && chmod 777 "$OUT"
+          cat > "$OUT/config.yaml" <<'EOF'
+          receivers:
+            otlp:
+              protocols:
+                http:
+                  endpoint: 0.0.0.0:4318
+          processors:
+            batch:
+              timeout: 1s
+          exporters:
+            file:
+              path: /out/otlp.jsonl
+          service:
+            pipelines:
+              traces:  { receivers: [otlp], processors: [batch], exporters: [file] }
+              metrics: { receivers: [otlp], processors: [batch], exporters: [file] }
+              logs:    { receivers: [otlp], processors: [batch], exporters: [file] }
+          EOF
+          docker network create rum-ci
+          docker run -d --name collector-ci --network rum-ci -v "$OUT:/out" \
+            otel/opentelemetry-collector-contrib:0.162.0 --config=/out/config.yaml
+          docker run -d --name demostore-rum --network rum-ci -p 8001:8000 \
+            -e DEMO_RUM_ENABLED=1 -e DEMO_TELEMETRY_ENABLED=1 \
+            -e OTEL_EXPORTER_OTLP_ENDPOINT=http://collector-ci:4318 demostore:ci
+          for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:8001/healthz && break; sleep 1; done
+          curl -fsS http://127.0.0.1:8001/login | grep -o '<script src="/__rum__/rum-v1.js?v=[0-9a-f]*" defer>'
+          # Ingress limits through the real container
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: text/plain' -d x http://127.0.0.1:8001/__rum__/v1/traces)" = 415
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8001/__rum__/v1/traces)" = 405
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8001/__rum__/v1/profiles)" = 404
+
+          cd rum
+          npm ci --ignore-scripts --no-audit --no-fund
+          RUM_BASE_URL=http://127.0.0.1:8001 RUM_CHROME_PATH="$(command -v google-chrome)" \
+            RUM_REPORT_PATH="$OUT/report.json" node browser_acceptance.mjs
+          cd ..
+
+          docker stop -t 40 demostore-rum   # workers flush their last spans, metrics and logs
+          sleep 3
+          docker stop -t 20 collector-ci     # file exporter flushes on shutdown
+          python3 tests/rum_e2e_check.py "$OUT/otlp.jsonl" "$OUT/report.json" "${{ github.sha }}"
+
       - name: Container logs
         if: always()
-        run: docker logs demostore-ci || true
+        run: |
+          docker logs demostore-ci || true
+          echo "----- demostore-rum -----"; docker logs demostore-rum 2>&1 | tail -n 80 || true
+          echo "----- collector-ci -----"; docker logs collector-ci 2>&1 | tail -n 80 || true
 
       - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'

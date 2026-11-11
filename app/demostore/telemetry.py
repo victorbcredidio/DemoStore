@@ -270,12 +270,14 @@ def configure(app):
 
     FlaskInstrumentor().instrument_app(
         app, tracer_provider=provider, meter_provider=NoOpMeterProvider(), request_hook=request_hook,
-        excluded_urls=r"/healthz(?:\?|$)|/static/|/favicon\.ico(?:\?|$)", enable_commenter=False,
+        # /__rum__/ is browser telemetry passing through: tracing it would create telemetry about telemetry.
+        excluded_urls=r"/healthz(?:\?|$)|/static/|/__rum__/|/favicon\.ico(?:\?|$)", enable_commenter=False,
     )
 
     @app.before_request
     def begin_response():
-        if request.path != "/healthz" and request.path != "/favicon.ico" and not request.path.startswith("/static/"):
+        if (request.path != "/healthz" and request.path != "/favicon.ico"
+                and not request.path.startswith(("/static/", "/__rum__/"))):
             request.environ["demostore.request_started"] = time.perf_counter()
 
     @app.after_request
