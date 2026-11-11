@@ -6,6 +6,9 @@ calls over loopback HTTP: inventory (127.0.0.1:8101), payment (:8102) and bank (
 If any process exits, all of them are stopped so the container exits and the restart
 policy can recover it. SIGTERM/SIGINT stop everything gracefully, which lets each
 worker flush its pending telemetry.
+
+As PID 1 it also reaps orphans, such as a finished `demostore traffic` worker, and stops
+a running traffic worker before the storefront on shutdown.
 """
 import os
 from pathlib import Path
@@ -64,6 +67,30 @@ def wait_healthy(port, timeout=20.0):
     return False
 
 
+def reap_children():
+    """Collect every exited child, managed or orphaned. Returns {pid: exit code}."""
+    exited = {}
+    while True:
+        try:
+            pid, status = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return exited
+        if pid == 0:
+            return exited
+        exited[pid] = os.waitstatus_to_exitcode(status)
+
+
+def stop_traffic_worker():
+    """`demostore traffic start` leaves a detached worker; stop it so it doesn't hit a dying storefront."""
+    try:
+        pid = int((Path(os.environ["DEMO_DATA_DIR"]) / "traffic-worker.pid").read_text())
+        if b"_traffic-worker" in Path(f"/proc/{pid}/cmdline").read_bytes():
+            os.kill(pid, signal.SIGTERM)
+            log("stopping the traffic generator")
+    except (OSError, ValueError, KeyError):
+        pass
+
+
 def main():
     prepare_environment()
     stopping = False
@@ -89,19 +116,21 @@ def main():
         "--threads", os.environ.get("DEMO_THREADS", "2"), "--timeout", "30", "--graceful-timeout", "30",
         "--access-logfile", "-", "--error-logfile", "-", "wsgi:app"]))
 
+    managed = {process.pid: (name, process) for name, process in processes}
     exit_code = 0
     while not stopping:
-        for name, process in processes:
-            code = process.poll()
-            if code is not None:
+        for pid, code in reap_children().items():
+            if pid in managed:
+                name, process = managed[pid]
+                process.returncode = code
                 log(f"{name} exited with code {code}; stopping the container")
-                exit_code = code or 1
+                exit_code = code if code and code > 0 else 1
                 stopping = True
-                break
-        else:
+        if not stopping:
             time.sleep(0.5)
 
-    # Storefront first, then its dependencies.
+    # Traffic generator first, then the storefront, then its dependencies.
+    stop_traffic_worker()
     for _name, process in reversed(processes):
         if process.poll() is None:
             process.terminate()

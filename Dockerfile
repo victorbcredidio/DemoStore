@@ -12,7 +12,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DEMO_DATA_DIR=/var/lib/demostore \
     DEMO_DATABASE=/var/lib/demostore/lab.sqlite3 \
     DEMO_PORT=8000 \
-    DEMO_BASE_URL=http://127.0.0.1:8000
+    DEMO_BASE_URL=http://127.0.0.1:8000 \
+    DEMO_TRAFFIC_BACKEND=process
 
 WORKDIR /opt/demostore
 

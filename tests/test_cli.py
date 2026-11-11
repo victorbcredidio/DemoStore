@@ -1,4 +1,6 @@
 """Operator input limits and finite traffic with bounded pending work."""
+import contextlib
+import io
 import json
 from pathlib import Path
 import sys
@@ -6,8 +8,10 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app"))
+import demostore_cli
 from demostore_cli import validate_traffic, traffic_worker
 
 
@@ -54,6 +58,55 @@ class CliTests(unittest.TestCase):
                 stop.set()
                 release.set()
                 thread.join(5)
+
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "the process backend reads /proc")
+class ProcessBackendTests(unittest.TestCase):
+    """`demostore traffic` without systemd, as used inside the container."""
+
+    def cli(self, *argv):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = demostore_cli.main(["--base-url", "http://127.0.0.1:9", *argv])
+        return code, output.getvalue()
+
+    def wait_for(self, predicate, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(.1)
+        return False
+
+    def test_start_status_restart_and_stop_a_detached_worker(self):
+        with tempfile.TemporaryDirectory(prefix="demostore-traffic-") as directory, \
+                mock.patch.object(demostore_cli, "STATE_DIR", Path(directory)), \
+                mock.patch.object(demostore_cli, "TRAFFIC_BACKEND", "process"):
+            self.addCleanup(demostore_cli.stop_process_worker)
+            state_path = Path(directory) / "traffic-state.json"
+            def state():
+                return json.loads(state_path.read_text()) if state_path.exists() else {}
+
+            self.assertEqual(self.cli("traffic", "start", "mixed", "--rps", "5", "--duration", "60")[0], 0)
+            first = demostore_cli.traffic_worker_pid()
+            self.assertIsNotNone(first)
+            # Port 9 refuses connections, so every job finishes quickly as an error.
+            self.assertTrue(self.wait_for(lambda: state().get("completed", 0) > 0))
+            code, output = self.cli("traffic", "status")
+            status = json.loads(output)
+            self.assertEqual((code, status["backend"], status["running"]), (0, "process", True))
+
+            # Starting again replaces the running worker instead of adding a second one.
+            self.assertEqual(self.cli("traffic", "start", "normal", "--rps", "2", "--duration", "60")[0], 0)
+            second = demostore_cli.traffic_worker_pid()
+            self.assertNotIn(second, (None, first))
+            self.assertTrue(self.wait_for(lambda: state().get("profile") == "normal"))
+
+            self.assertEqual(self.cli("traffic", "stop")[0], 0)
+            self.assertIsNone(demostore_cli.traffic_worker_pid())
+            self.assertFalse(state()["running"])
+            self.assertFalse(json.loads(self.cli("traffic", "status")[1])["running"])
+            self.assertEqual(self.cli("traffic", "stop")[0], 0)  # stopping twice is harmless
 
 
 if __name__ == "__main__":

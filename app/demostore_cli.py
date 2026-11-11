@@ -1,4 +1,9 @@
-"""DemoStore operator CLI and a finite, bounded, systemd-managed traffic generator."""
+"""DemoStore operator CLI and a finite, bounded traffic generator.
+
+The generator runs in the background either as a systemd unit (VM deployment) or as a
+detached process (container, or any host without systemd). Choose with
+DEMO_TRAFFIC_BACKEND=systemd|process; the default is systemd when systemctl exists.
+"""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -7,8 +12,10 @@ import json
 import os
 from pathlib import Path
 import random
+import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -16,8 +23,12 @@ import urllib.request
 
 from demostore.contracts import SCENARIOS, RUN_ID
 
-STATE_DIR = Path("/var/lib/demostore")
+STATE_DIR = Path(os.environ.get("DEMO_DATA_DIR", "/var/lib/demostore"))
 TRAFFIC_UNIT = "demostore-traffic.service"
+TRAFFIC_BACKEND = os.environ.get("DEMO_TRAFFIC_BACKEND") or ("systemd" if shutil.which("systemctl") else "process")
+WORKER_PID_FILE = "traffic-worker.pid"
+WORKER_MARKER = b"_traffic-worker"
+WORKER_STOP_SECONDS = 30
 DEFAULT_BASE_URL = os.environ.get("DEMO_BASE_URL", "http://127.0.0.1:8000")
 PROFILES = {
     "normal": (("normal", 100),),
@@ -180,6 +191,40 @@ def traffic_worker(config, state_path, stop=None, execute=None):
     return state
 
 
+def traffic_worker_pid():
+    """PID of the running background worker, or None. Zombies and reused PIDs don't count."""
+    try:
+        pid = int((STATE_DIR / WORKER_PID_FILE).read_text())
+        process_state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except (OSError, ValueError, IndexError):
+        return None
+    return pid if process_state not in ("Z", "X") and WORKER_MARKER in cmdline else None
+
+
+def stop_process_worker():
+    """SIGTERM lets the worker drain its bounded in-flight requests and save its final state."""
+    pid = traffic_worker_pid()
+    if pid:
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + WORKER_STOP_SECONDS
+        while traffic_worker_pid() == pid and time.monotonic() < deadline:
+            time.sleep(.2)
+        if traffic_worker_pid() == pid:
+            os.kill(pid, signal.SIGKILL)
+    (STATE_DIR / WORKER_PID_FILE).unlink(missing_ok=True)
+
+
+def start_process_worker():
+    script = Path(__file__).resolve()
+    with open(STATE_DIR / "traffic-worker.log", "wb") as output:
+        process = subprocess.Popen([sys.executable, str(script), WORKER_MARKER.decode()],
+            cwd=script.parent, env={**os.environ, "DEMO_DATA_DIR": str(STATE_DIR)},
+            stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+    (STATE_DIR / WORKER_PID_FILE).write_text(str(process.pid))
+    process.returncode = 0  # Detached on purpose: whoever inherits it reaps it, not this CLI.
+
+
 def require_local_root():
     if os.name != "posix" or os.geteuid() != 0 or STATE_DIR.resolve() != Path("/var/lib/demostore"):
         raise ValueError("Traffic start/stop requires root on the DemoStore VM")
@@ -243,15 +288,26 @@ def main(argv=None):
             print(json.dumps(traffic_worker(config, STATE_DIR / "traffic-state.json", stop)))
             return 0
         if args.command == "traffic":
+            systemd = TRAFFIC_BACKEND == "systemd"
+            if not systemd and TRAFFIC_BACKEND != "process":
+                raise ValueError("DEMO_TRAFFIC_BACKEND must be systemd or process")
             if args.traffic_command == "status":
                 path = STATE_DIR / "traffic-state.json"
                 state = json.loads(path.read_text()) if path.exists() else {"running": False}
-                active = subprocess.run(["systemctl", "is-active", "--quiet", TRAFFIC_UNIT]).returncode == 0
-                print(json.dumps({**state, "service_active": active, "running": active and state.get("running", False)}, indent=2))
+                if systemd:
+                    active = subprocess.run(["systemctl", "is-active", "--quiet", TRAFFIC_UNIT]).returncode == 0
+                else:
+                    active = traffic_worker_pid() is not None
+                print(json.dumps({**state, "backend": TRAFFIC_BACKEND, "service_active": active,
+                                  "running": active and state.get("running", False)}, indent=2))
                 return 0
-            require_local_root()
+            if systemd:
+                require_local_root()
             if args.traffic_command == "stop":
-                subprocess.run(["systemctl", "stop", TRAFFIC_UNIT], check=True)
+                if systemd:
+                    subprocess.run(["systemctl", "stop", TRAFFIC_UNIT], check=True)
+                else:
+                    stop_process_worker()
                 print("DemoStore traffic stopped; bounded in-flight requests drained.")
                 return 0
             if args.validation_id and not RUN_ID.fullmatch(args.validation_id):
@@ -260,6 +316,12 @@ def main(argv=None):
                 "duration": args.duration if args.duration is not None else args.phase_seconds * 4 if args.profile == "incident" else 120,
                 "phase_seconds": args.phase_seconds, "seed": args.seed, "base_url": args.base_url,
                 "validation_id": args.validation_id})
+            if not systemd:
+                stop_process_worker()
+                atomic_json(STATE_DIR / "traffic-request.json", config)
+                start_process_worker()
+                print(json.dumps(config, indent=2))
+                return 0
             subprocess.run(["systemctl", "stop", TRAFFIC_UNIT], check=True)
             atomic_json(STATE_DIR / "traffic-request.json", config)
             # The unit runs as demostore, and must read the root-created request.

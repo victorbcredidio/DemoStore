@@ -56,6 +56,19 @@ jobs:
           docker exec demostore-ci demostore run card-declined
           docker exec demostore-ci demostore transactions --limit 3
 
+      - name: Smoke-test the traffic generator inside the container
+        run: |
+          status() { docker exec demostore-ci demostore traffic status; }
+          docker exec demostore-ci demostore traffic start mixed --rps 2 --duration 60
+          sleep 8
+          status | python3 -c "import json,sys; s=json.load(sys.stdin); print(s); assert s['backend']=='process' and s['running'] and s['completed']>0, s"
+          docker exec demostore-ci demostore traffic stop
+          status | python3 -c "import json,sys; s=json.load(sys.stdin); print(s); assert not s['running'] and s['in_flight']==0, s"
+          # PID 1 must reap the finished worker: no zombie processes left behind.
+          sleep 2
+          docker exec demostore-ci python -c "import glob; z=[p for p in glob.glob('/proc/[0-9]*/stat') if open(p).read().rsplit(')',1)[1].split()[0]=='Z']; print('zombies:', z); assert not z"
+          curl -fsS http://127.0.0.1:8000/healthz
+
       - name: Container logs
         if: always()
         run: docker logs demostore-ci || true

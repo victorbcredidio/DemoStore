@@ -71,6 +71,7 @@ docker run -d --name demostore -p 8080:8000 -v demostore-data:/var/lib/demostore
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | none | Base OTLP/HTTP URL, for example `http://collector:4318`; the entrypoint derives the `/v1/traces`, `/v1/metrics` and `/v1/logs` endpoints |
 | `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_ENDPOINT` | `http://127.0.0.1:4318/v1/…` | Per-signal endpoints (override the base) |
 | `OTEL_METRIC_EXPORT_INTERVAL` | `15000` | Metric export interval in ms |
+| `DEMO_TRAFFIC_BACKEND` | `process` in the image | How `demostore traffic` runs: `process` (detached background process) or `systemd` (`demostore-traffic.service`) |
 
 All state (SQLite database and session key) is in the `/var/lib/demostore` volume. The container runs as UID 10001. If you bind-mount a host directory instead of a named volume, make it writable for that UID.
 
@@ -106,7 +107,26 @@ docker exec demostore demostore transactions --limit 5
 docker exec demostore demostore transaction TXN-00000001
 ```
 
-The background traffic generator (`demostore traffic start|stop`) is designed for the systemd deployment and is not available in the container.
+### Background traffic
+
+`demostore traffic` sends a steady, bounded stream of synthetic transactions (at most 4 in flight) for a fixed time, so APM views and Telemetry query items have data to show.
+
+```bash
+docker exec demostore demostore traffic start mixed --rps 1 --duration 600   # 10 minutes of mixed outcomes
+docker exec demostore demostore traffic status                               # counters, current phase, last trace id
+docker exec demostore demostore traffic stop                                 # drains in-flight requests, then stops
+```
+
+| Profile | Mix |
+| --- | --- |
+| `normal` | Healthy checkouts only |
+| `mixed` | 60% normal plus warnings, slow, declined, out-of-stock, timeouts, errors and retries |
+| `degraded` | 40% normal; the rest slow, degraded payments, warnings, retries and timeouts |
+| `incident` | Four phases of `--phase-seconds` each (default 15 s): healthy → degraded → incident → recovery |
+
+Limits: `--rps` 0.1–5, `--duration` 1–3600 s (default 120 s; `incident` defaults to 4 phases). `--seed` makes the scenario sequence repeatable. Starting again replaces the running generator.
+
+Inside the container the generator runs as a background process (`DEMO_TRAFFIC_BACKEND=process`); its output is in `/var/lib/demostore/traffic-worker.log`. It stops with the container and doesn't restart on its own. On a VM with the original systemd units, the same commands drive `demostore-traffic.service` (run them as root).
 
 ## Sending telemetry to Zabbix (or any OTLP backend)
 
@@ -139,7 +159,16 @@ Then run DemoStore with:
 -e DEMO_TELEMETRY_ENABLED=1 -e OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector-host>:4318
 ```
 
+> **Collector on the same host as the container?** Don't use `127.0.0.1`: inside the container it is the container itself. Point DemoStore at the host instead, `OTEL_EXPORTER_OTLP_ENDPOINT=http://host.containers.internal:4318` (Podman) or `http://host.docker.internal:4318` (Docker; on Linux add `--add-host=host.docker.internal:host-gateway`). The Collector's HTTP receiver must then listen on more than loopback (`0.0.0.0:4318` as above, followed by a Collector restart); block port 4318 from the rest of the network with a firewall.
+>
+> Quick check from inside the container (prints `200`):
+> ```bash
+> podman exec demostore python -c "import urllib.request as u; print(u.urlopen(u.Request('http://host.containers.internal:4318/v1/traces', data=b'', headers={'Content-Type':'application/x-protobuf'}), timeout=3).status)"
+> ```
+
 In the Zabbix proxy's frontend configuration, **APM → Data collection enabled** must be ticked, or the proxy won't open port 4317.
+
+Zabbix stores incoming metrics in ClickHouse (for example `otel_metrics_sum` and `otel_metrics_histogram`); it doesn't create items from them automatically. Use the APM views, or create **Telemetry query** items to turn them into item history and triggers. Traces and logs appear only when the store receives real requests (health checks are excluded); an idle store sends metrics only.
 
 **What you get:**
 
@@ -157,12 +186,12 @@ Every request is labelled `lab.traffic_type = manual | synthetic | unclassified`
 python -m venv .venv
 . .venv/bin/activate            # Windows: .venv\Scripts\activate
 pip install -r requirements.lock.txt
-python -m unittest discover -s tests -p "test_*.py" -v     # 58 tests, no network needed
+python -m unittest discover -s tests -p "test_*.py" -v     # 59 tests (one is Linux-only), no network needed
 ```
 
 `tests/smoke_http.py --base-url http://localhost:8080` runs live checks against a running instance. It changes the shared mode temporarily and restores it afterwards.
 
-Every push to `main` runs the unit tests, builds the image, starts it and runs `smoke_http.py` plus CLI checks against the running container. Only then is the image published to `ghcr.io/victorbcredidio/demostore`, tagged `latest` and `sha-<commit>`; `v*` git tags add a version tag.
+Every push to `main` runs the unit tests, builds the image, starts it and runs `smoke_http.py`, CLI checks and a short traffic-generator run against the running container. Only then is the image published to `ghcr.io/victorbcredidio/demostore`, tagged `latest` and `sha-<commit>`; `v*` git tags add a version tag.
 
 ## Limitations
 
