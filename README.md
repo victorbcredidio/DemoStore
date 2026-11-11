@@ -224,13 +224,38 @@ The **Browser RUM lab** panel inside *Lab controls* creates one-off browser prob
 
 ### Find it in Zabbix
 
-1. Open the store in a normal browser, sign in and do a checkout. Browser spans are sent every 2 s, metrics every 10 s, and everything is flushed when the tab is hidden or closed.
-2. **APM → Traces:** select `demostore-browser` together with `demostore`, `demostore-payment` and `demostore-bank`. Open a trace whose root is `browser.checkout`. The waterfall shows `browser.checkout` → `POST /api/checkout` (browser) → `POST /api/checkout` (demostore) → `checkout` → … → `payment.authorize` → `bank.charge`, all with one trace ID.
-3. To find one specific checkout, take the trace ID from the `X-Trace-Id` response header (browser developer tools → Network → `checkout`) and search for it.
-4. Useful span attributes (*Customize table → Span attributes*): `lab.traffic_type`, `http.response.status_code`, `ui.outcome`, `ui.duration_ms`, `web.vital.name`, `web.vital.value`, `web.vital.rating`, `error.type`.
-5. **APM → Logs:** filter by event name (`browser.web_vital`, `browser.error`, `browser.checkout.visible_result`). **APM → Metrics:** the `demostore.browser.*` metrics.
+Checked on Zabbix 8.0.0. Browser data shows up about 10–30 seconds after the visit; Web Vitals are completed when the tab is hidden or closed.
 
-To confirm arrival directly in ClickHouse (run on the ClickHouse host; if a column name differs in your version, `DESCRIBE TABLE` first):
+**See one checkout from the browser down to the bank**
+
+1. Open the store in a browser, sign in, add a product and click **Checkout**.
+2. In Zabbix, go to **APM → Traces**.
+3. In the filter, type `browser.checkout` in **Operation name** and click **Apply**. Each row is one checkout started in a browser: *Service name* `demostore-browser`, with the number of spans next to it (19 for a normal checkout).
+4. Click a row. The **Span tree** opens on the right:
+
+   ```text
+   demostore-browser    browser.checkout          ← the click until the result is visible
+   demostore-browser      POST /api/checkout      ← the request, as the browser saw it
+   demostore                POST /api/checkout    ← the same request, as the server saw it
+   demostore                  checkout → cart.validate, pricing.quote, POST /reserve, POST /authorize, order.save …
+   demostore-payment            payment.authorize → POST /charge
+   demostore-bank                 bank.charge
+   ```
+
+To find **one particular** checkout, put its trace ID in the **Trace ID** field instead. The store returns it in the `X-Trace-Id` response header (browser developer tools → Network → `checkout`).
+
+**Filter tips (APM → Traces)**
+
+- **Service name** is a text search over *every* span of a trace, not a list: `demostore` matches all five services. `demostore-browser` also lists many one-span traces, because each Web Vital, file load and button click is its own small trace. Use **Operation name** to narrow down: `browser.checkout`, `browser.web_vital`, `browser.error`, `browser.navigation`.
+- **Span attributes**, for example `lab.traffic_type` *Equals* `manual`, keeps only people and drops Zabbix Browser items and other automation. Other useful keys: `ui.outcome`, `web.vital.name`, `web.vital.rating`, `error.type`, `http.response.status_code`.
+- **Status → Error** shows failed checkouts and the browser lab's simulated JavaScript errors.
+
+**Logs and metrics**
+
+- **APM → Logs:** **Service name** `demostore-browser`. There is no event-name filter in this view; filter with **Body** instead: `browser web_vital`, `browser error`, `browser checkout visible_result` or `browser page observed`. The values are in the log attributes (`web.vital.name`, `web.vital.value`, `web.vital.rating`).
+- **APM → Metrics:** **Service name** `demostore-browser`: `demostore.browser.http.duration`, `demostore.browser.checkout.duration`, `demostore.browser.long_task.duration`, `demostore.browser.errors`.
+
+To confirm arrival directly in ClickHouse, run this on the ClickHouse host. If your ClickHouse user has a password, add `--user <user> --password`.
 
 ```bash
 clickhouse-client -q "
@@ -249,7 +274,7 @@ clickhouse-client -q "SELECT ServiceName, SpanName, SpanAttributes['lab.traffic_
 
 ### HTTP vs HTTPS
 
-The container serves plain HTTP. On `localhost`/`127.0.0.1` a browser treats that as a secure context; from another machine (`http://<host>:8080`) it doesn't. The observer itself uses no secure-context-only API, and in the original lab it loaded and exported over plain HTTP. Each page records the situation as `browser.secure_context` on the `browser.page.observed` log, so you can compare. Whether a particular browser version reports fewer Web Vitals over plain HTTP has **not been measured** here.
+The container serves plain HTTP. On `localhost`/`127.0.0.1` a browser treats that as a secure context; from another machine (`http://<host>:8080`) it doesn't. The observer itself uses no secure-context-only API. In a test from another machine over plain HTTP with Chrome, the checkout trace, logs, metrics and the TTFB, FCP, INP and CLS Web Vitals all arrived in Zabbix; LCP didn't appear in that one run. Each page records the situation as `browser.secure_context` on the `browser.page.observed` log.
 
 For HTTPS, put a TLS reverse proxy (NGINX, Caddy, Traefik) in front of port 8000 that passes the path through unchanged, and run the store with `-e DEMO_COOKIE_SECURE=1`. `/__rum__/` must be proxied like any other path; don't cache or buffer-rewrite it. Behind a proxy all visitors share the proxy's address for the rate limit.
 
@@ -286,3 +311,4 @@ Every push to `main` runs the unit tests, builds the image (including the observ
 - Tuned for demonstrations, not load testing.
 - OpenTelemetry's browser SDKs are still experimental upstream; the pinned versions (`rum/package.json`) are the ones tested here. Missing Web Vitals mean "not reported", not zero; INP needs an interaction, and the last export of a page can be lost if the browser is killed.
 - The initial HTML page load is not part of a browser trace (the observer isn't running yet); only `/api/*` calls made after it loads join backend traces.
+- Third-party RUM dashboards built for the standard OpenTelemetry web auto-instrumentation (`documentLoad`, user-interaction and fetch spans with `session.id` and `url.full`, Web Vitals as `rum.*` log attributes) show DemoStore's browser data only partly: requests and errors appear, but sessions, page loads and Web Vitals stay empty. The core Zabbix APM views above show everything.
