@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <meta name="lab-traffic-type" content="{{ traffic_type }}">
+  <title>DemoStore — Lab store</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='store.css') }}">
+  <script src="{{ url_for('static', filename='store.js') }}" defer></script>
+</head>
+<body data-page="{% block page %}{% endblock %}">
+  <div class="shell">
+    <div class="title-row"><span>DemoStore — Example store</span><span class="badge">Lab demo</span></div>
+    <header class="store-header">
+      <a class="brand" href="/" aria-label="DemoStore home">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h14l1 13H4L5 8Z"/><path d="M8 9V6a4 4 0 0 1 8 0v3"/></svg>
+        <span>DemoStore</span>
+      </a>
+      {% block account %}<span class="muted">Simple shopping. Simulated orders.</span>{% endblock %}
+    </header>
+    <main>{% block content %}{% endblock %}</main>
+    <footer>Demo data only. No payments or real purchases.</footer>
+  </div>
+</body>
+</html>

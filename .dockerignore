@@ -1,0 +1,11 @@
+.git
+.github
+tests
+**/__pycache__
+**/*.pyc
+**/*.sqlite3*
+.env
+.venv
+venv
+compose.yaml
+README.md

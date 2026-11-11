@@ -1,0 +1,55 @@
+{% extends 'base.html' %}
+{% block page %}store{% endblock %}
+{% block account %}
+<div class="account"><span class="muted">Signed in: <span id="signed-in-user">{{ username }}</span></span><button id="logout-button" class="text-button" type="button">Sign out</button></div>
+{% endblock %}
+{% block content %}
+<h1 class="sr-only">DemoStore products</h1>
+<section class="products" aria-label="Products">
+{% for product in products %}
+  <article class="product-card" id="product-{{ product.id }}">
+    <div class="product-icon" aria-hidden="true">
+    {% if product.icon == 'laptop' %}
+      <svg viewBox="0 0 32 32"><rect x="6" y="5" width="20" height="17" rx="2"/><path d="M4 22h24l1 3H3l1-3ZM12 25h8"/></svg>
+    {% else %}
+      <svg viewBox="0 0 32 32"><path d="M6 18v-3a10 10 0 0 1 20 0v3"/><rect x="5" y="16" width="5" height="11" rx="2"/><rect x="22" y="16" width="5" height="11" rx="2"/></svg>
+    {% endif %}
+    </div>
+    <h2>{{ product.name }}</h2>
+    <p class="price">${{ '%.2f'|format(product.price_cents / 100) }}</p>
+    <button class="add-button primary" id="add-{{ product.id }}" data-product="{{ product.id }}" type="button">Add to cart<span class="sr-only">: {{ product.name }}</span></button>
+  </article>
+{% endfor %}
+</section>
+
+<section class="cart-card" aria-label="Shopping cart">
+  <div class="cart-heading"><h2>Cart: <span id="cart-count">0 items</span></h2><strong id="cart-total">$0.00</strong></div>
+  <p id="cart-items" class="muted cart-items">Your cart is empty.</p>
+  <button id="checkout-button" class="primary checkout" type="button" disabled>Complete Checkout</button>
+  <button id="clear-cart-button" type="button" class="text-button clear-cart" disabled>Clear cart</button>
+  <p id="checkout-result" class="feedback" role="status" aria-live="polite" data-state="idle"></p>
+</section>
+<p id="store-feedback" class="feedback" role="alert"></p>
+
+<details class="lab-controls" id="lab-controls">
+  <summary id="lab-controls-toggle"><span>Lab controls</span><span class="mode-tag" id="current-mode">Normal</span></summary>
+  <div class="lab-body">
+    <p class="muted">Change checkout behavior for all lab sessions. Browsing and recovery stay available.</p>
+    <div class="mode-buttons" role="group" aria-label="Checkout scenario">
+      <button id="mode-normal" data-mode="normal" type="button">Normal</button>
+      <button id="mode-slow" data-mode="slow" type="button">Slow</button>
+      <button id="mode-error" data-mode="error" type="button">Error</button>
+      <button id="mode-recovery" data-mode="recovery" type="button">Recovery</button>
+      {% for mode, label in [('warning','Low stock warning'),('payment-degraded','Degraded payment'),('timeout','Provider timeout'),('out-of-stock','Out of stock'),('card-declined','Card declined'),('retry','Retry succeeds'),('database-error','Order storage failure'),('notification-warning','Receipt warning')] %}
+      <button id="mode-{{ mode }}" data-mode="{{ mode }}" type="button">{{ label }}</button>
+      {% endfor %}
+    </div>
+    <div class="control-row"><label for="delay-ms">Slow delay (ms)</label><input id="delay-ms" type="number" min="100" max="10000" step="100" value="3000"><button id="reset-button" type="button">Reset demo</button></div>
+    <p class="muted small">Reset returns to normal and empties your cart. Orders remain simulated history.</p>
+    <p id="lab-feedback" class="feedback" role="status" aria-live="polite"></p>
+    <p class="muted small" id="last-checkout">No checkout in this session yet.</p>
+    <p class="muted small" id="transaction-details"></p>
+    <p class="muted small">Session: <span id="session-traffic-type">{{ traffic_type }}</span></p>
+  </div>
+</details>
+{% endblock %}

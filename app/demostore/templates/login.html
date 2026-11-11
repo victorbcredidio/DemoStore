@@ -1,0 +1,20 @@
+{% extends 'base.html' %}
+{% block page %}login{% endblock %}
+{% block content %}
+<section class="login-card" aria-labelledby="login-title">
+  <span class="eyebrow">Welcome to the lab</span>
+  <h1 id="login-title">Sign in to DemoStore</h1>
+  <p class="muted">Browse two products and try a simulated checkout.</p>
+  <form id="login-form">
+    <label for="login-username">Username</label>
+    <input id="login-username" name="username" autocomplete="username" required maxlength="80" autofocus>
+    <label for="login-password">Password</label>
+    <input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="120">
+    <input id="traffic-type" type="hidden" value="{{ selected_traffic }}">
+    <button id="login-submit" type="submit" class="primary">Sign in</button>
+    <p id="login-feedback" class="feedback" role="alert"></p>
+  </form>
+  {% if default_account %}<p class="account-hint">Lab account: <code>demo_user</code> / <code>demo_pass</code></p>
+  {% else %}<p class="account-hint">Use the test credentials supplied by your lab operator.</p>{% endif %}
+</section>
+{% endblock %}

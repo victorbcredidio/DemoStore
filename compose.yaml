@@ -1,0 +1,20 @@
+services:
+  demostore:
+    image: ghcr.io/victorbcredidio/demostore:latest
+    build: .
+    ports:
+      - "8080:8000"
+    environment:
+      # Public, test-only account shown on the login page. Change both to use your own.
+      DEMO_USERNAME: demo_user
+      DEMO_PASSWORD: demo_pass
+      # Optional: send traces, metrics and logs to an OpenTelemetry Collector (OTLP/HTTP).
+      # DEMO_TELEMETRY_ENABLED: "1"
+      # OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+    volumes:
+      - demostore-data:/var/lib/demostore
+    stop_grace_period: 45s
+    restart: unless-stopped
+
+volumes:
+  demostore-data:
