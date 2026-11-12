@@ -30,3 +30,13 @@ export function outcome(status) { return status >= 500 ? 'error' : status >= 400
 export function releaseVersion(value) {
   return typeof value === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(value) ? value : 'unknown';
 }
+// A visit: a random id kept in the tab's sessionStorage and renewed after 30 minutes without a page load.
+// It is not persistent, not shared between tabs and says nothing about who the person is.
+export const SESSION_IDLE_MS = 30 * 60 * 1000;
+export function nextSession(saved, now, makeId) {
+  const valid = saved && typeof saved.id === 'string' && /^[0-9a-f]{32}$/.test(saved.id)
+    && Number.isFinite(saved.last) && now - saved.last >= 0 && now - saved.last < SESSION_IDLE_MS;
+  return {id: valid ? saved.id : makeId(), last: now};
+}
+// Page address without query string or fragment, for the standard url.full attribute. Unknown paths stay 'other'.
+export function pageUrl(origin, route) { return origin + (route === 'other' ? '/other' : route); }

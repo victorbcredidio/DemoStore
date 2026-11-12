@@ -44,6 +44,14 @@ def main(export_path, report_path, release):
     check(browser, "the Collector received demostore-browser spans")
     for name in ("browser.navigation", "browser.web_vital", "browser.checkout", "POST /api/checkout", "browser.error"):
         check(name in names, f"browser span {name} received")
+    for name in ("documentLoad", "documentFetch", "resourceFetch"):
+        check(name in names, f"standard RUM span {name} received")
+    check(all(attrs.get("session.id") for _, _, attrs in browser), "every browser span has a session.id")
+    check(any(attrs.get("event_type") == "click" for _, _, attrs in browser), "click actions carry event_type")
+    check(browser[0][0].get("user_agent.original"), "browser resource has user_agent.original")
+    vital_attrs = [values(rec.get("attributes")) for res, rec in logs if res.get("service.name") == "demostore-browser"]
+    check(any(a.get("rum.metric") and a.get("rum.value") is not None and a.get("rum.id") for a in vital_attrs),
+          "Web Vital logs carry rum.metric/rum.value/rum.id")
     check(any(res.get("service.name") == "demostore-browser" for res, _ in metrics), "browser metrics received")
     check(any(res.get("service.name") == "demostore-browser" for res, _ in logs), "browser logs received")
     resource = browser[0][0]
