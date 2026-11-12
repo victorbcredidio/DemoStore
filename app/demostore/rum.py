@@ -79,11 +79,13 @@ class Relay:
         self.endpoints = dict(endpoints)
         self.timeout = timeout
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
-        # Keep Gunicorn threads available for shoppers if the Collector is slow.
-        self.slots = threading.BoundedSemaphore(1)
+        # Keep Gunicorn threads available for shoppers if the Collector is slow. A browser sends spans, logs and
+        # metrics at nearly the same moment (an error produces all three), so allow a few at once and wait a little
+        # longer: with one slot and a 1 s wait, the second signal of a burst could be refused and lost.
+        self.slots = threading.BoundedSemaphore(3)
 
     def send(self, signal, body):
-        if not self.slots.acquire(timeout=1):
+        if not self.slots.acquire(timeout=2):
             return 503, b'{"error":"busy"}'
         try:
             upstream = urllib.request.Request(self.endpoints[signal], data=body, method="POST",
