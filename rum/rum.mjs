@@ -228,16 +228,32 @@ function start() {
     if(mode==='rejection')Promise.reject(new Error('DemoStore browser lab rejection'));
     if(mode==='reset')document.getElementById('rum-layout-demo')?.remove();
   }
+  // The simulations change little or nothing on screen, so say what each one did and, for errors, whether it was caught.
+  const SAYS={stall:'The browser was frozen for 0.6 s (reported as a long task and worse INP).',
+    shift:'A banner appears above the store in about 1 s (reported as layout shift, CLS).',
+    error:'A JavaScript error was thrown. Nothing changes on screen; it is reported as an error.',
+    rejection:'An unhandled promise rejection was raised. Nothing changes on screen; it is reported as an error.',
+    reset:'The demo banner was removed.'};
+  function announce(mode,note){
+    const text=SAYS[mode]||mode;
+    note.textContent=text;
+    if(mode==='error'||mode==='rejection')setTimeout(()=>{
+      note.textContent=text+' Errors caught in this page view: '+state.errors+'.';
+    },400);
+  }
   const controls=document.getElementById('lab-controls');
   if(controls){
     const panel=document.createElement('section'), title=document.createElement('h3'), info=document.createElement('p');
     const buttons=document.createElement('div');buttons.className='mode-buttons';
     panel.id='rum-lab';panel.className='lab-body';title.textContent='Browser RUM lab';
     info.textContent='One-shot simulations in this tab. Browser measurements use service demostore-browser.';
-    panel.append(title,info);
+    const note=document.createElement('p');note.id='rum-lab-feedback';note.className='muted small';
+    note.setAttribute('role','status');note.setAttribute('aria-live','polite');
+    note.textContent='Click a button: what it did is shown here.';
+    panel.append(title,info,note);
     for(const [mode,label] of [['stall','Stall browser 600 ms'],['shift','Delayed layout shift'],['error','JavaScript error'],['rejection','Unhandled rejection'],['reset','Remove demo banner']]){
       const button=document.createElement('button');button.type='button';button.id='rum-'+mode;button.textContent=label;
-      button.addEventListener('click',()=>simulate(mode));buttons.append(button);
+      button.addEventListener('click',()=>{simulate(mode);announce(mode,note);});buttons.append(button);
     }
     panel.append(buttons);
     controls.append(panel);
