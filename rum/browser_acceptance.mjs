@@ -121,6 +121,15 @@ try {
   assert(observed.capabilities.secure_context);
   const names=new Set(spans().map(s=>s.name));
   for(const name of ['browser.navigation','browser.resource','browser.long_task','browser.web_vital','browser.error','browser.checkout'])assert(names.has(name),name);
+  // Standard fields read by generic RUM viewers (Zabbix APM "Real user monitoring").
+  for(const name of ['documentLoad','documentFetch','resourceFetch'])assert(names.has(name),name);
+  const sessionIds=new Set(spans().map(s=>decodeAttributes(s.attributes)['session.id']));
+  assert(sessionIds.size===1&&[...sessionIds][0]&&/^[0-9a-f]{32}$/.test([...sessionIds][0]),'one session.id for the whole visit');
+  assert(spans().every(s=>/^[0-9a-f]{24}$/.test(decodeAttributes(s.attributes)['view.id']||'')),'every span has a view.id');
+  const load=spans().find(s=>s.name==='documentLoad');
+  assert((load.events||[]).some(ev=>ev.name==='loadEventEnd'),'documentLoad carries timing events');
+  assert(spans().some(s=>decodeAttributes(s.attributes).event_type==='click'),'click actions carry event_type');
+  assert(spans().some(s=>decodeAttributes(s.attributes)['url.full']),'url.full present');
   const vitalNames=new Set(spans().filter(s=>s.name==='browser.web_vital').map(s=>decodeAttributes(s.attributes)['web.vital.name']));
   assert(vitalNames.has('FCP')&&vitalNames.has('TTFB'));
   report.web_vitals=[...vitalNames];

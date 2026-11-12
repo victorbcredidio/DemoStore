@@ -8,7 +8,8 @@ import {OTLPMetricExporter, AggregationTemporalityPreference} from '@opentelemet
 import {LoggerProvider, BatchLogRecordProcessor} from '@opentelemetry/sdk-logs';
 import {OTLPLogExporter} from '@opentelemetry/exporter-logs-otlp-http';
 import {onCLS, onFCP, onINP, onLCP, onTTFB} from 'web-vitals';
-import {apiRoute, resourceRoute, pageRoute, trafficType, initialTraffic, traceparent, outcome, releaseVersion} from './policy.mjs';
+import {apiRoute, resourceRoute, pageRoute, trafficType, initialTraffic, traceparent, outcome, releaseVersion,
+  nextSession, pageUrl} from './policy.mjs';
 
 // This observer intentionally does not install broad automatic DOM/fetch/error capture.
 // Only the bounded fields constructed below can enter the SDKs.
@@ -20,10 +21,21 @@ function start() {
   const version = releaseVersion(document.querySelector('meta[name="demostore-release"]')?.content);
   const origin = location.origin, route = pageRoute(location.pathname);
   const pageId = Array.from(crypto.getRandomValues(new Uint8Array(12)), b=>b.toString(16).padStart(2,'0')).join('');
+  const newId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), b=>b.toString(16).padStart(2,'0')).join('');
+  // Standard OpenTelemetry browser fields: a visit (session.id) kept in this tab, and this page view (view.id).
+  let sessionId;
+  try {
+    const saved = JSON.parse(sessionStorage.getItem('demostore.rum.session') || 'null');
+    const next = nextSession(saved, Date.now(), newId);
+    sessionStorage.setItem('demostore.rum.session', JSON.stringify(next));
+    sessionId = next.id;
+  } catch { sessionId = newId(); }
+  const device = matchMedia('(max-width: 768px), (pointer: coarse)').matches ? 'mobile' : 'desktop';
   let traffic = initialTraffic(location.href, document.querySelector('meta[name="lab-traffic-type"]')?.content,
     navigator.webdriver === true, origin);
   const resource = resourceFromAttributes({'service.name':'demostore-browser', 'service.namespace':'user-experience-lab',
-    'service.version':version, 'deployment.environment.name':'lab', 'telemetry.sdk.language':'webjs'});
+    'service.version':version, 'deployment.environment.name':'lab', 'telemetry.sdk.language':'webjs',
+    'user_agent.original':navigator.userAgent.slice(0,300)});
   const traceProvider = new WebTracerProvider({resource, spanProcessors:[new BatchSpanProcessor(
     new OTLPTraceExporter({url:origin+'/__rum__/v1/traces', timeoutMillis:3000}),
     {maxQueueSize:256, maxExportBatchSize:32, scheduledDelayMillis:2000, exportTimeoutMillis:4000})]});
@@ -45,7 +57,8 @@ function start() {
       entry_types:typeof PerformanceObserver!=='undefined' ? [...PerformanceObserver.supportedEntryTypes] : []}};
   const metricAttrs = (extra={}) => ({'page.route':route,'lab.traffic_type':traffic,
     'lab.browser_simulation':state.simulation_used,...extra});
-  const attrs = (extra={}) => ({...metricAttrs(),'lab.synthetic':traffic==='synthetic','rum.page.id':pageId,...extra});
+  const attrs = (extra={}) => ({...metricAttrs(),'lab.synthetic':traffic==='synthetic','rum.page.id':pageId,
+    'session.id':sessionId,'view.id':pageId,'url.full':pageUrl(origin,route),...extra});
   const epoch = ms => performance.timeOrigin + ms;
   const allowed = () => {if(state.observations>=600){state.dropped++; return false;} state.observations++; return true;};
   function remember(name, data) {state.recent.push({name,...data}); if(state.recent.length>30)state.recent.shift();}
@@ -88,7 +101,7 @@ function start() {
       if(!['GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS'].includes(method)||!allowed())return nativeFetch(input,init);
       start=performance.now();
       const parent = path==='/api/checkout' && checkout ? trace.setSpan(context.active(),checkout.span) : context.active();
-      s=tracer.startSpan(method+' '+path,{kind:SpanKind.CLIENT,attributes:attrs({'http.request.method':method,'http.route':path}),startTime:epoch(start)},parent);
+      s=tracer.startSpan(method+' '+path,{kind:SpanKind.CLIENT,attributes:attrs({'http.request.method':method,'http.route':path,'url.full':origin+path}),startTime:epoch(start)},parent);
       const headers = new Headers(init?.headers || (input instanceof Request ? input.headers : undefined));
       headers.set('traceparent',traceparent(s.spanContext()));
       options={...init,headers};
@@ -112,6 +125,10 @@ function start() {
       },error=>{safeFinish(0,true);throw error;});
     } catch(error) {safeFinish(0,true);throw error;}
   };
+  // Timing phases as span events, named like the W3C Navigation/Resource Timing fields. Zero means "not measured".
+  function timings(s, entry, names) {
+    for(const name of names){const v=entry[name]; if(typeof v==='number'&&v>0)s.addEvent(name,epoch(v));}
+  }
   function observe(type, callback) {
     if(!state.capabilities.entry_types.includes(type))return;
     try {new PerformanceObserver(list=>{for(const entry of list.getEntries())callback(entry);})
@@ -121,6 +138,14 @@ function start() {
     const name=resourceRoute(e.name,origin); if(!name)return;
     span('browser.resource',{'resource.route':name,'resource.duration_ms':e.duration,
       'resource.transfer_bytes':e.transferSize},e.startTime,e.responseEnd);
+    // The same file as the standard "resourceFetch" span, with its timing phases, for generic RUM viewers.
+    if(allowed()){
+      const r=tracer.startSpan('resourceFetch',{attributes:attrs({'url.full':origin+name,'resource.route':name,
+        'http.response_content_length':e.encodedBodySize}),startTime:epoch(e.startTime)});
+      timings(r,e,['fetchStart','domainLookupStart','domainLookupEnd','connectStart','secureConnectionStart',
+        'connectEnd','requestStart','responseStart','responseEnd']);
+      r.end(epoch(Math.max(e.startTime,e.responseEnd)));
+    }
   });
   observe('longtask',e=>{
     const s=span('browser.long_task',{'browser.long_task.duration_ms':e.duration},e.startTime,e.startTime+e.duration);
@@ -130,7 +155,10 @@ function start() {
   function vital(metric) {
     const revision=(vitals.get(metric.id)||0)+1; vitals.set(metric.id,revision);
     const data={'web.vital.name':metric.name,'web.vital.value':metric.value,'web.vital.rating':metric.rating,
-      'web.vital.id':metric.id,'web.vital.sequence':revision,'web.vital.unit':metric.name==='CLS'?'1':'ms'};
+      'web.vital.id':metric.id,'web.vital.sequence':revision,'web.vital.unit':metric.name==='CLS'?'1':'ms',
+      // Same measurement under the names the Zabbix APM "Real user monitoring" page reads.
+      'rum.metric':metric.name,'rum.value':metric.value,'rum.rating':metric.rating,'rum.id':metric.id,
+      'rum.page':route,'rum.device':device};
     const s=span('browser.web_vital',data); if(s)log('browser.web_vital',data,s);
     // Do not histogram lifecycle revisions: population queries deduplicate by metric.id.
   }
@@ -142,12 +170,28 @@ function start() {
       'navigation.dom_interactive_ms':e.domInteractive,'navigation.dom_content_loaded_ms':e.domContentLoadedEventEnd,
       'navigation.type':['navigate','reload','back_forward','prerender'].includes(e.type)?e.type:'other'},0,end);
     if(s)log('browser.page.observed',{'browser.secure_context':isSecureContext},s);
+    // Standard page-load spans: "documentLoad" (whole load) with a "documentFetch" child (the HTML request).
+    if(allowed()&&allowed()){
+      const load=tracer.startSpan('documentLoad',{attributes:attrs(),startTime:epoch(0)});
+      timings(load,e,['fetchStart','unloadEventStart','unloadEventEnd','redirectStart','redirectEnd','domInteractive',
+        'domContentLoadedEventStart','domContentLoadedEventEnd','domComplete','loadEventStart','loadEventEnd']);
+      for(const p of performance.getEntriesByType('paint')){
+        if(p.name==='first-paint')load.addEvent('firstPaint',epoch(p.startTime));
+        if(p.name==='first-contentful-paint')load.addEvent('firstContentfulPaint',epoch(p.startTime));
+      }
+      const fetchSpan=tracer.startSpan('documentFetch',{attributes:attrs(),startTime:epoch(e.fetchStart||0)},
+        trace.setSpan(context.active(),load));
+      timings(fetchSpan,e,['fetchStart','domainLookupStart','domainLookupEnd','connectStart','secureConnectionStart',
+        'connectEnd','requestStart','responseStart','responseEnd']);
+      fetchSpan.end(epoch(Math.max(e.fetchStart||0,e.responseEnd||0)));
+      load.end(epoch(Math.max(0,end)));
+    }
   };
   if(document.readyState==='complete')navigation();else window.addEventListener('load',()=>setTimeout(navigation,0),{once:true});
   function browserError(type) {
     if(state.errors>=10)return;
     state.errors++;
-    const data={'error.type':type}, s=span('browser.error',data);
+    const data={'error.type':type,'exception.type':type}, s=span('browser.error',data);
     if(s){log('browser.error',data,s,17);errorCount.add(1,metricAttrs(data));}
   }
   window.addEventListener('error',e=>browserError(e instanceof ErrorEvent?'uncaught_exception':'resource_load_error'),true);
@@ -156,10 +200,11 @@ function start() {
     const button=e.target instanceof Element?e.target.closest('button'):null;
     if(!button||button.disabled)return;
     if(button.id==='checkout-button'&&!checkout&&allowed()){
-      const start=performance.now(), s=tracer.startSpan('browser.checkout',{attributes:attrs({'ui.action':'checkout'}),startTime:epoch(start)});
+      const start=performance.now(), s=tracer.startSpan('browser.checkout',{attributes:attrs({'ui.action':'checkout','event_type':'click','target_element':'button#'+button.id}),
+        startTime:epoch(start)});
       checkout={span:s,start,timeout:setTimeout(()=>finishCheckout('timeout'),30000)};
     } else if(['login-submit','logout-button','add-laptop','add-headphones','clear-cart-button'].includes(button.id)) {
-      span('browser.action',{'ui.action':button.id});
+      span('browser.action',{'ui.action':button.id,'event_type':'click','target_element':'button#'+button.id});
     }
   },true);
   const result=document.getElementById('checkout-result');

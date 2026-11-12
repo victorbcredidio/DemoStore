@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {apiRoute, resourceRoute, initialTraffic, trafficType, pageRoute, traceparent, outcome, releaseVersion} from './policy.mjs';
+import {apiRoute, resourceRoute, initialTraffic, trafficType, pageRoute, traceparent, outcome, releaseVersion,
+  nextSession, pageUrl} from './policy.mjs';
 const origin = 'https://store.example';
 test('propagation is limited to exact same-origin app APIs', () => {
   assert.equal(apiRoute('/api/checkout?token=secret', origin), '/api/checkout');
@@ -31,4 +32,17 @@ test('service.version comes from the page release id and rejects anything else',
   assert.equal(releaseVersion('02af451c9e1b'), '02af451c9e1b');
   assert.equal(releaseVersion('20261104-b8204721836d'), '20261104-b8204721836d');
   for (const value of [undefined, null, '', 'a b', '<script>', 'x'.repeat(65)]) assert.equal(releaseVersion(value), 'unknown');
+});
+test('a visit keeps its id for 30 minutes of inactivity and rejects anything malformed', () => {
+  const make = () => 'a'.repeat(32), now = 1e12, saved = id => ({id, last: now - 1000});
+  assert.equal(nextSession(null, now, make).id, make());
+  assert.equal(nextSession(saved('b'.repeat(32)), now, make).id, 'b'.repeat(32));
+  assert.equal(nextSession({id: 'b'.repeat(32), last: now - 31 * 60000}, now, make).id, make());
+  assert.equal(nextSession(saved('<script>'), now, make).id, make());
+  assert.equal(nextSession({id: 'b'.repeat(32), last: now + 5000}, now, make).id, make());
+});
+test('url.full has no query string or fragment and unknown pages stay generic', () => {
+  assert.equal(pageUrl(origin, '/login'), origin + '/login');
+  assert.equal(pageUrl(origin, '/'), origin + '/');
+  assert.equal(pageUrl(origin, 'other'), origin + '/other');
 });

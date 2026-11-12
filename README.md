@@ -220,6 +220,8 @@ Browser spans: `browser.navigation`, `browser.web_vital`, `browser.resource`, `b
 
 Labels on every browser signal: `lab.traffic_type` (`synthetic` for `/login?traffic=synthetic` and for automated browsers such as Selenium; `manual` otherwise), `page.route` (`/`, `/login` or `other`), `rum.page.id` (random per page view, not per person), `lab.browser_simulation`. The resource carries `service.namespace=user-experience-lab` and `service.version` = the store's `DEMO_RELEASE_ID`, the same as the backend.
 
+**Standard RUM fields (for generic viewers such as the Zabbix APM *Real user monitoring* page).** In addition to the `browser.*` spans above, the observer sends the common OpenTelemetry browser names: `session.id` (random per tab, renewed after 30 minutes without a page load, never stored beyond the tab), `view.id` (same value as `rum.page.id`), `url.full` (origin + the fixed route, never a query string), `user_agent.original` (the browser's own identification string, as any web server logs it), spans `documentLoad` / `documentFetch` / `resourceFetch` with Navigation/Resource Timing events, `event_type=click` and `target_element=button#<id>` on button clicks, `exception.type` on errors, and `rum.metric` / `rum.value` / `rum.rating` / `rum.id` / `rum.page` / `rum.device` on the Web Vital log records. Nothing was removed: the `browser.*` spans, metrics and logs are unchanged.
+
 The **Browser RUM lab** panel inside *Lab controls* creates one-off browser problems in that tab: a 600 ms stall (long task and a poor INP), a delayed layout shift (CLS), a JavaScript error and an unhandled rejection. After using it, that page's data is marked `lab.browser_simulation=true`.
 
 ### Find it in Zabbix
